@@ -9,6 +9,7 @@
 
 - **9-DoF sensor fusion on the ESP32** — Kalman-filtered roll/pitch plus a tilt-compensated compass yaw, the same scheme as the [esp-idf-gy85](https://github.com/nopnop2002/esp-idf-gy85) reference demo; no IMU libraries are needed
 - **web UI** — Three.js cube and canvas-gauges, fed by a JSON WebSocket stream, with automatic reconnect
+- **PyTeapot support** — the board also broadcasts the Euler angles over UDP (port 5005, nopnop2002-compatible format), so the [PyTeapot](https://github.com/thecountoftuscany/PyTeapot-Quaternion-Euler-cube-rotation) OpenGL viewer works out of the box
 - **calibration built in** — at boot, automatically while the module lies flat and still, or manually with the **Calibrate** button; kept in RTC memory and in flash (NVS)
 - **motion-activated deep sleep** — after 60 s without movement the board goes to deep sleep; the accelerometer's activity interrupt wakes it up when the module is picked up
 - **network friendly** — DHCP + mDNS: just open **`http://esp32c3.local`** (or the IP printed on the serial monitor) on the same network
@@ -66,7 +67,7 @@ Notes:
 
 ## Configuration overview
 
-- in the sketch (`ESP32-GY-85-3D-Gadget.ino`): Wi-Fi credentials (`credentials.h`), `MDNS_HOSTNAME`, `SLEEP_IDLE_MS`
+- in the sketch (`ESP32-GY-85-3D-Gadget.ino`): Wi-Fi credentials (`credentials.h`), `MDNS_HOSTNAME`, `SLEEP_IDLE_MS`, and the PyTeapot UDP output (`UDP_PYTEAPOT_ENABLED`, `UDP_PYTEAPOT_PORT`, `UDP_PYTEAPOT_INTERVAL_MS`)
 - in `gy85_imu.h`: everything IMU-related — pins, magnetometer offsets and signs, motion thresholds, re-calibration windows (`0` disables the automatic re-calibration), NVS namespace
 
 ## Build and flash (Arduino IDE)
@@ -119,6 +120,33 @@ The page can also send text commands back to the board:
   `{"cal":"started"}` → sampling began, `{"cal":"done"}` → new offsets applied and stored,
   `{"cal":"refused"}` → the module is not flat and still, `{"cal":"aborted"}` → it moved during sampling; the status is shown next to the button
 
+## View the angles with PyTeapot (UDP)
+
+The board can also drive the **PyTeapot** OpenGL viewer ([thecountoftuscany/PyTeapot-Quaternion-Euler-cube-rotation](https://github.com/thecountoftuscany/PyTeapot-Quaternion-Euler-cube-rotation)) — the same IMU → ESP32 → UDP → `pyteapot.py` scheme as the [esp-idf-gy85](https://github.com/nopnop2002/esp-idf-gy85) demo. About 20 times per second the board **broadcasts** the Euler angles to `255.255.255.255` on **UDP port 5005**, as a text datagram in the format `pyteapot.py` parses out of the box (`useQuat = False`):
+
+```
+"y<yaw>yp<pitch>pr<roll>r"      e.g.  y-12.345678yp45.678901pr-3.456789r
+```
+
+(the doubled letters are intentional — the parser splits on `y`, `p` and `r`)
+
+Run the stock viewer (no edits needed) on any computer in the same network:
+
+```
+sudo apt install python3-pip python3-setuptools     # Linux
+python3 -m pip install -U pip
+python3 -m pip install pygame
+python3 -m pip install PyOpenGL PyOpenGL_accelerate
+git clone https://github.com/thecountoftuscany/PyTeapot-Quaternion-Euler-cube-rotation
+cd PyTeapot-Quaternion-Euler-cube-rotation
+python3 pyteapot.py
+```
+
+- on macOS the `apt` line is not needed — `pip3 install pygame PyOpenGL` is enough (`PyOpenGL_accelerate` occasionally fails to build on Apple silicon)
+- the broadcast is on by default; switch it off with `UDP_PYTEAPOT_ENABLED 0` (interval: `UDP_PYTEAPOT_INTERVAL_MS`, port: `UDP_PYTEAPOT_PORT`)
+- the viewer works independently of the web page, but the deep sleep still applies: with no page connected and the module lying still, the board falls asleep after `SLEEP_IDLE_MS` and the stream stops — move the module to wake it up
+- if nothing arrives, check that the computer and the board are on the same network/subnet (some access points block broadcast traffic between clients)
+
 ## Deep sleep (motion activated)
 
 To save power the board switches to **deep sleep** when the module has not moved for a while:
@@ -170,8 +198,9 @@ The accel/gyro zero offsets are measured when the module lies **flat and still**
 
 **Application — `ESP32-GY-85-3D-Gadget.ino`**
 
-- `setup()` — starts the serial port, reports a deep-sleep wake and creates both tasks on core 0.
+- `setup()` — starts the serial port, reports a deep-sleep wake and creates the tasks on core 0.
 - `taskWifi()` — connects through `WiFiMulti`, starts mDNS (`esp32c3.local`), the HTTP server (port 80) and the WebSocket server (port 8001); reconnects whenever Wi-Fi drops.
+- `taskUdp()` — broadcasts the Euler angles as a UDP text datagram (`y<yaw>yp<pitch>pr<roll>r`) to `255.255.255.255:5005` every `UDP_PYTEAPOT_INTERVAL_MS` for the PyTeapot viewer; runs only while Wi-Fi is connected (remove it with `UDP_PYTEAPOT_ENABLED 0`).
 - `taskStatus()` — runs the IMU at ~50 Hz: `gy85Update()` → manual calibration request → `gy85RecalTick()` → deep-sleep decision → calibration replies → quaternion + JSON → WebSocket broadcast.
 - `onWebSocketEvent()` — connection bookkeeping and command parsing (the `calibrate` text command).
 - `onHttpReqFunc()` — serves the embedded web page for `/` and `/index.html`.

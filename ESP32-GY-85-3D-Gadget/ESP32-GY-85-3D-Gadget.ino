@@ -6,6 +6,7 @@
 #include <WiFiMulti.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <lwip/sockets.h>  // raw UDP socket for the PyTeapot broadcast
 
 // Web page served over HTTP — generated from index.html by
 // tools/gen_index_html.py (Arduino IDE cannot embed files directly).
@@ -44,6 +45,17 @@ const char *passwordTab[NUM_NETWORKS] = {
 // Enter deep sleep after this many milliseconds without movement and with
 // no web browser connected. Set to 0 to keep the board always awake.
 #define SLEEP_IDLE_MS 60000
+
+/* --- PyTeapot viewer (UDP broadcast) --- */
+
+// The board also broadcasts the Euler angles as text datagrams on UDP port
+// 5005, in the format the PyTeapot viewer expects - the same one the
+// nopnop2002/esp-idf-gy85 demo sends ("y<yaw>yp<pitch>pr<roll>r"; the
+// doubled letters are the separators pyteapot.py splits on). Set
+// UDP_PYTEAPOT_ENABLED to 0 to switch the broadcast off.
+#define UDP_PYTEAPOT_ENABLED 1
+#define UDP_PYTEAPOT_PORT 5005
+#define UDP_PYTEAPOT_INTERVAL_MS 50
 
 /* =============== config section end =============== */
 
@@ -128,6 +140,7 @@ void enterDeepSleep(void) {
 
 void taskWifi(void *parameter);
 void taskStatus(void *parameter);
+void taskUdp(void *parameter);
 
 SemaphoreHandle_t mtx;
 
@@ -156,6 +169,16 @@ void setup() {
                           3,    /* Priority of the task. */
                           NULL, /* Task handle. */
                           0);   /* Core where the task should run */
+
+#if UDP_PYTEAPOT_ENABLED
+  xTaskCreatePinnedToCore(taskUdp,   /* Task function. */
+                          "taskUdp", /* String with name of task. */
+                          4000,      /* Stack size in bytes. */
+                          NULL, /* Parameter passed as input of the task */
+                          1,    /* Priority of the task. */
+                          NULL, /* Task handle. */
+                          0);   /* Core where the task should run */
+#endif
 }
 
 void taskWifi(void *parameter) {
@@ -304,6 +327,41 @@ void taskStatus(void *parameter) {
     delay(20);
   }
 }
+
+#if UDP_PYTEAPOT_ENABLED
+/* Broadcast the Euler angles on UDP port 5005 so that the PyTeapot viewer
+   (thecountoftuscany/PyTeapot-Quaternion-Euler-cube-rotation) displays the
+   orientation - the same scheme the nopnop2002/esp-idf-gy85 demo uses. The
+   datagram goes to 255.255.255.255, so any computer in the network running
+   pyteapot.py picks it up. */
+void taskUdp(void *parameter) {
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(UDP_PYTEAPOT_PORT);
+  addr.sin_addr.s_addr = htonl(INADDR_BROADCAST); /* 255.255.255.255 */
+
+  int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (fd < 0) {
+    Serial.println("UDP: socket() failed");
+    vTaskDelete(NULL);
+  }
+
+  /* sending to the broadcast address has to be allowed explicitly */
+  int broadcast = 1;
+  setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+
+  char buffer[64];
+  while (1) {
+    if (WiFi.status() == WL_CONNECTED) {
+      int len = snprintf(buffer, sizeof(buffer), "y%fyp%fpr%fr", gy85Yaw,
+                         gy85Pitch, gy85Roll);
+      sendto(fd, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr));
+    }
+    vTaskDelay(pdMS_TO_TICKS(UDP_PYTEAPOT_INTERVAL_MS));
+  }
+}
+#endif
 
 void loop() {
   Serial.printf("loop() running on core %d\r\n", xPortGetCoreID());
