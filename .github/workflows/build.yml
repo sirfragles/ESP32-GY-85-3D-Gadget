@@ -1,0 +1,55 @@
+name: Build firmware
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Configure board manager (ESP32)
+        run: |
+          arduino-cli config init --overwrite --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+
+      - name: Install ESP32 core (version used for local testing)
+        run: arduino-cli core install esp32:esp32@3.3.12
+
+      - name: Install libraries (Library Manager)
+        run: |
+          arduino-cli lib install "WebSockets"
+          arduino-cli lib install "ArduinoJson@6.18.5"
+
+      - name: Verify index_html.h is up to date
+        run: |
+          python3 tools/gen_index_html.py
+          git diff --exit-code -- ESP32-GY-85-3D-Gadget/index_html.h
+
+      - name: Compile firmware (XIAO ESP32C3, min_spiffs)
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:XIAO_ESP32C3:PartitionScheme=min_spiffs \
+            --output-dir build \
+            ./ESP32-GY-85-3D-Gadget
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: build/
+          if-no-files-found: error
